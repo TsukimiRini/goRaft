@@ -26,6 +26,12 @@ import (
 	"../labrpc"
 )
 
+const (
+	follower  = 0
+	candidate = 1
+	leader    = 2
+)
+
 // import "bytes"
 // import "../labgob"
 
@@ -70,9 +76,9 @@ type Raft struct {
 	currentTerm int
 	votedFor    int
 	logs        []LogEntry
-	leaderId    int
 
 	timeout int
+	status  int
 }
 
 // return currentTerm and whether this server
@@ -84,7 +90,7 @@ func (rf *Raft) GetState() (int, bool) {
 	// Your code here (2A).
 	rf.mu.Lock()
 	term = rf.currentTerm
-	isleader = (rf.leaderId == rf.me)
+	isleader = (rf.status == leader)
 	rf.mu.Unlock()
 	return term, isleader
 }
@@ -176,17 +182,16 @@ type AppendEntriesReply struct {
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = false
-		rf.mu.Unlock()
 		DPrintf("RequestVote #%v: term of %v too old", rf.me, args.CandidateId)
 		return
 	}
-	if rf.currentTerm < args.Term || rf.votedFor == args.Term || rf.votedFor == -1 {
+	if rf.currentTerm < args.Term || rf.votedFor == args.CandidateId || rf.votedFor == -1 {
+		rf.beFollower(args.Term)
 		rf.votedFor = args.CandidateId
-		rf.leaderId = args.CandidateId
-		rf.currentTerm = args.Term
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = true
 		DPrintf("RequestVote #%v: admit %v", rf.me, args.CandidateId)
@@ -195,7 +200,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		reply.VoteGranted = false
 		DPrintf("RequestVote #%v: have voted for %v", rf.me, rf.votedFor)
 	}
-	rf.mu.Unlock()
 }
 
 //
@@ -203,24 +207,21 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 //
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
 		reply.Success = false
-		rf.mu.Unlock()
 		DPrintf("AppendEntries #%v: term of %v too old", rf.me, args.LeaderId)
 		return
 	}
-	rf.timeout = GetInitTimeout()
-	rf.currentTerm = args.Term
-	rf.votedFor = args.LeaderId
+	rf.beFollower(args.Term)
 	reply.Term = rf.currentTerm
 	reply.Success = true
-	rf.mu.Unlock()
 	DPrintf("AppendEntries #%v: heartbeat from %v in term %v", rf.me, args.LeaderId, reply.Term)
 }
 
 func GetInitTimeout() int {
-	return rand.Intn(250) + 250
+	return rand.Intn(200) + 300
 }
 
 //
@@ -314,10 +315,11 @@ func (rf *Raft) leaderSendHeartBeats() (bool, int) {
 		if i != rf.me {
 			args := &AppendEntriesArgs{term, rf.me}
 			reply := &AppendEntriesReply{}
-			if !rf.sendAppendEntires(i, args, reply) {
-				return false, term
-			}
-			if !reply.Success {
+			ok := rf.sendAppendEntires(i, args, reply)
+			// if !rf.sendAppendEntires(i, args, reply) {
+			// 	return false, term
+			// }
+			if ok && !reply.Success {
 				return false, reply.Term
 			}
 		}
@@ -326,11 +328,68 @@ func (rf *Raft) leaderSendHeartBeats() (bool, int) {
 }
 
 func (rf *Raft) beLeader() {
-	rf.mu.Lock()
+	if rf.status != leader {
+		DPrintf("%v converted to leader", rf.me)
+	}
 	rf.votedFor = rf.me
-	rf.leaderId = rf.me
-	rf.mu.Unlock()
-	rf.leaderSendHeartBeats()
+	rf.status = leader // leader
+}
+
+func (rf *Raft) beFollower(term int) {
+	if rf.status != follower {
+		DPrintf("%v converted to follower", rf.me)
+	}
+	rf.currentTerm = term
+	rf.status = follower
+	rf.votedFor = -1
+	rf.timeout = GetInitTimeout()
+}
+
+func (rf *Raft) beCandidate() {
+	if rf.status != candidate {
+		DPrintf("%v converted to candidate", rf.me)
+	}
+	rf.status = candidate
+	rf.votedFor = rf.me
+	rf.currentTerm++
+	rf.timeout = GetInitTimeout()
+}
+
+func (rf *Raft) kickOffElection() {
+	var votedCnt int32 = 1
+	for idx, _ := range rf.peers {
+		if idx != rf.me {
+			go func(i int) {
+				rf.mu.Lock()
+				term := rf.currentTerm
+				rf.mu.Unlock()
+				DPrintf("%v try to get admitted by %v in term %v", rf.me, i, term)
+				args := &RequestVoteArgs{term, rf.me}
+				reply := &RequestVoteReply{}
+				ok := rf.sendRequestVote(i, args, reply)
+				if ok {
+					rf.mu.Lock()
+					defer rf.mu.Unlock()
+					if reply.Term > rf.currentTerm {
+						rf.beFollower(reply.Term)
+						return
+					}
+					if rf.status != candidate || rf.currentTerm != args.Term {
+						return
+					}
+					if reply.VoteGranted {
+						DPrintf("%v get admitted by %v", rf.me, i)
+						atomic.AddInt32(&votedCnt, 1)
+						if atomic.LoadInt32(&votedCnt) > int32(len(rf.peers)/2) {
+							rf.beLeader()
+						}
+					}
+				} else {
+					DPrintf("%v not get package from %v in term %v", rf.me, i, term)
+				}
+			}(idx)
+		}
+	}
 }
 
 //
@@ -351,48 +410,25 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.persister = persister
 	rf.me = me
 
+	// Your initialization code here (2A, 2B, 2C).
 	rf.timeout = GetInitTimeout()
 	rf.currentTerm = 0
 	rf.votedFor = -1
-	rf.leaderId = -1
+	rf.status = 0 // follower
 
-	// Your initialization code here (2A, 2B, 2C).
 	// follower
 	go func() {
 		for true {
 			time.Sleep(10 * time.Millisecond)
 			rf.mu.Lock()
-			if rf.votedFor != rf.me {
+			if rf.status == follower || rf.status == candidate {
 				rf.timeout -= 10
 			}
-			if rf.votedFor != rf.me && rf.timeout <= 0 {
+			if (rf.status == follower || rf.status == candidate) && rf.timeout <= 0 {
 				DPrintf("%v try to be leader", rf.me)
-				rf.currentTerm++
-				rf.leaderId = -1
-				rf.votedFor = rf.me
-				term := rf.currentTerm
-				// rf.votedFor = rf.me
-				votedCnt := 1
-				rf.timeout = GetInitTimeout()
+				rf.beCandidate()
 				rf.mu.Unlock()
-				for i, _ := range rf.peers {
-					if i == rf.me {
-						continue
-					}
-					args := &RequestVoteArgs{term, rf.me}
-					reply := &RequestVoteReply{}
-					DPrintf("%v try to get admitted by %v in term %v", rf.me, i, term)
-					if rf.sendRequestVote(i, args, reply) && reply.VoteGranted == true {
-						DPrintf("%v get admitted by %v", rf.me, i)
-						votedCnt++
-					} else {
-						DPrintf("%v not get admitted by %v", rf.me, i)
-					}
-				}
-				if votedCnt > len(rf.peers)/2 {
-					DPrintf("%v be leader", rf.me)
-					rf.beLeader()
-				}
+				rf.kickOffElection()
 			} else {
 				rf.mu.Unlock()
 			}
@@ -404,14 +440,12 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		for true {
 			time.Sleep(10 * time.Millisecond)
 			rf.mu.Lock()
-			if rf.leaderId == rf.me {
+			if rf.status == leader {
 				rf.mu.Unlock()
 				ok, newTerm := rf.leaderSendHeartBeats()
 				rf.mu.Lock()
 				if !ok {
-					rf.currentTerm = newTerm
-					rf.votedFor = -1
-					rf.leaderId = -1
+					rf.beFollower(newTerm)
 				}
 			}
 			rf.mu.Unlock()
