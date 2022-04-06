@@ -307,24 +307,29 @@ func (rf *Raft) killed() bool {
 	return z == 1
 }
 
-func (rf *Raft) leaderSendHeartBeats() (bool, int) {
-	rf.mu.Lock()
-	term := rf.currentTerm
-	rf.mu.Unlock()
+func (rf *Raft) leaderSendHeartBeats() {
 	for i, _ := range rf.peers {
 		if i != rf.me {
-			args := &AppendEntriesArgs{term, rf.me}
-			reply := &AppendEntriesReply{}
-			ok := rf.sendAppendEntires(i, args, reply)
-			// if !rf.sendAppendEntires(i, args, reply) {
-			// 	return false, term
-			// }
-			if ok && !reply.Success {
-				return false, reply.Term
-			}
+			go func(idx int) {
+				rf.mu.Lock()
+				args := &AppendEntriesArgs{rf.currentTerm, rf.me}
+				rf.mu.Unlock()
+				reply := &AppendEntriesReply{}
+				ok := rf.sendAppendEntires(idx, args, reply)
+				// if !rf.sendAppendEntires(i, args, reply) {
+				// 	return false, term
+				// }
+				rf.mu.Lock()
+				defer rf.mu.Unlock()
+				if !ok || rf.status != leader || rf.currentTerm != args.Term {
+					return
+				} else if reply.Term > rf.currentTerm {
+					rf.beFollower(reply.Term)
+					return
+				}
+			}(i)
 		}
 	}
-	return true, term
 }
 
 func (rf *Raft) beLeader() {
@@ -442,13 +447,10 @@ func Make(peers []*labrpc.ClientEnd, me int,
 			rf.mu.Lock()
 			if rf.status == leader {
 				rf.mu.Unlock()
-				ok, newTerm := rf.leaderSendHeartBeats()
-				rf.mu.Lock()
-				if !ok {
-					rf.beFollower(newTerm)
-				}
+				rf.leaderSendHeartBeats()
+			} else {
+				rf.mu.Unlock()
 			}
-			rf.mu.Unlock()
 		}
 	}()
 
