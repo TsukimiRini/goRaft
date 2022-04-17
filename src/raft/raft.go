@@ -136,7 +136,8 @@ func (rf *Raft) ApplyMsgInOneRound() {
 	}
 }
 
-func (rf *Raft) LeaderUpdateCommitIdx(idx int) {
+func (rf *Raft) LeaderUpdateCommitIdx(server int) {
+	idx := rf.matchIndex[server]
 	if idx > rf.commitIndex {
 		cnt := 0
 		for _, matched := range rf.matchIndex {
@@ -321,7 +322,21 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// 	DPrintf(strings.Join(argsEn, " "))
 	// 	DPrintf("%s", args.Entries[0].Command)
 	// }
-	rf.logs = append(rf.logs[:args.PrevLogIndex+1], args.Entries...)
+	pointer := args.PrevLogIndex
+	for i, log := range args.Entries {
+		pointer++
+		if pointer > rf.GetLastLogIdx() {
+			rf.logs = append(rf.logs, args.Entries[i:]...)
+			break
+		}
+		if log.Term == rf.logs[pointer].Term {
+			continue
+		} else {
+			rf.logs = rf.logs[:pointer]
+			rf.logs = append(rf.logs, args.Entries[i:]...)
+			break
+		}
+	}
 	// reply.Term = rf.currentTerm
 	reply.Success = true
 	if args.LeaderCommit > rf.commitIndex {
@@ -471,7 +486,7 @@ func (rf *Raft) leaderSendHeartBeats() {
 					if reply.Success {
 						rf.matchIndex[idx] = args.PrevLogIndex + len(args.Entries)
 						rf.nextIndex[idx] = rf.matchIndex[idx] + 1
-						rf.LeaderUpdateCommitIdx(rf.matchIndex[idx])
+						rf.LeaderUpdateCommitIdx(idx)
 						rf.mu.Unlock()
 						return
 					} else {
@@ -589,10 +604,10 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// follower
 	go func() {
 		for true {
-			time.Sleep(10 * time.Millisecond)
+			time.Sleep(100 * time.Millisecond)
 			rf.mu.Lock()
 			if rf.status == follower || rf.status == candidate {
-				rf.timeout -= 10
+				rf.timeout -= 100
 			}
 			if (rf.status == follower || rf.status == candidate) && rf.timeout <= 0 {
 				DPrintf("%v try to be leader", rf.me)
