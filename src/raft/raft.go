@@ -259,7 +259,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	if rf.GetLastLogTerm() > args.LastLogTerm || rf.GetLastLogTerm() == args.LastLogTerm && rf.GetLastLogIdx() > args.LastLogIndex {
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = false
-		DPrintf("RequestVote #%v: log of %v too old, term %v idx %v", rf.me, args.CandidateId, args.LastLogTerm, args.LastLogIndex)
+		DPrintf("RequestVote #%v: log of %v too old, term %v idx %v VS term %v idx %v",
+			rf.me, args.CandidateId, args.LastLogTerm, args.LastLogIndex, rf.GetLastLogTerm(), rf.GetLastLogIdx())
 		return
 	}
 	if rf.votedFor == args.CandidateId || rf.votedFor == -1 {
@@ -588,7 +589,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// follower
 	go func() {
 		for true {
-			time.Sleep(100 * time.Millisecond)
+			time.Sleep(10 * time.Millisecond)
 			rf.mu.Lock()
 			if rf.status == follower || rf.status == candidate {
 				rf.timeout -= 10
