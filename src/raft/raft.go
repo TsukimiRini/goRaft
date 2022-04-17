@@ -20,8 +20,6 @@ package raft
 import (
 	"math"
 	"math/rand"
-	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -296,7 +294,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			rf.me, args.PrevLogIndex, args.LeaderId)
 		return
 	} else if args.PrevLogIndex >= 0 && rf.logs[args.PrevLogIndex].Term != args.PrevLogTerm {
-		rf.logs = rf.logs[:args.PrevLogIndex-1]
+		DPrintf("rf.GetLastLogIdx() %v args.PrevLogIndex %v", rf.GetLastLogIdx(), args.PrevLogIndex)
 		inconsistentTerm := rf.logs[args.PrevLogIndex].Term
 		reply.InconsistentTerm = inconsistentTerm
 
@@ -306,20 +304,22 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 				break
 			}
 		}
+
+		rf.logs = rf.logs[:args.PrevLogIndex-1]
 		DPrintf("AppendEntries #%v: log inconsistency, Term %v not %v by %v in idx %v",
-			rf.me, rf.logs[args.PrevLogIndex].Term, args.PrevLogTerm, args.PrevLogIndex, args.LeaderId)
+			rf.me, reply.InconsistentTerm, args.PrevLogTerm, args.PrevLogIndex, args.LeaderId)
 		return
 	}
 	rf.beFollower(args.Term)
 
-	var argsEn []string = []string{"args.Entries"}
-	for _, ent := range args.Entries {
-		argsEn = append(argsEn, strconv.Itoa(ent.Term))
-	}
-	if len(args.Entries) > 0 {
-		DPrintf(strings.Join(argsEn, " "))
-		DPrintf("%s", args.Entries[0].Command)
-	}
+	// var argsEn []string = []string{"args.Entries"}
+	// for _, ent := range args.Entries {
+	// 	argsEn = append(argsEn, strconv.Itoa(ent.Term))
+	// }
+	// if len(args.Entries) > 0 {
+	// 	DPrintf(strings.Join(argsEn, " "))
+	// 	DPrintf("%s", args.Entries[0].Command)
+	// }
 	rf.logs = append(rf.logs[:args.PrevLogIndex+1], args.Entries...)
 	// reply.Term = rf.currentTerm
 	reply.Success = true
@@ -328,14 +328,14 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.ApplyMsgInOneRound()
 	}
 	DPrintf("AppendEntries #%v: appendEntries from %v in term %v", rf.me, args.LeaderId, reply.Term)
-	var str []string = []string{"rf.logs", strconv.Itoa(rf.GetLastLogIdx())}
-	for _, ent := range rf.logs {
-		str = append(str, strconv.Itoa(ent.Term))
-	}
-	DPrintf(strings.Join(str, " "))
-	if rf.GetLastLogIdx() > 0 {
-		DPrintf("command: %s", rf.logs[rf.GetLastLogIdx()].Command)
-	}
+	// var str []string = []string{"rf.logs", strconv.Itoa(rf.GetLastLogIdx())}
+	// for _, ent := range rf.logs {
+	// 	str = append(str, strconv.Itoa(ent.Term))
+	// }
+	// DPrintf(strings.Join(str, " "))
+	// if rf.GetLastLogIdx() > 0 {
+	// 	DPrintf("command: %s", rf.logs[rf.GetLastLogIdx()].Command)
+	// }
 }
 
 func GetInitTimeout() int {
@@ -588,7 +588,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// follower
 	go func() {
 		for true {
-			time.Sleep(10 * time.Millisecond)
+			time.Sleep(100 * time.Millisecond)
 			rf.mu.Lock()
 			if rf.status == follower || rf.status == candidate {
 				rf.timeout -= 10
@@ -607,7 +607,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// leader
 	go func() {
 		for true {
-			time.Sleep(10 * time.Millisecond)
+			time.Sleep(100 * time.Millisecond)
 			rf.mu.Lock()
 			if rf.status == leader {
 				rf.mu.Unlock()
