@@ -18,12 +18,14 @@ package raft
 //
 
 import (
+	"bytes"
 	"math"
 	"math/rand"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"../labgob"
 	"../labrpc"
 )
 
@@ -163,12 +165,14 @@ func (rf *Raft) LeaderUpdateCommitIdx(server int) {
 func (rf *Raft) persist() {
 	// Your code here (2C).
 	// Example:
-	// w := new(bytes.Buffer)
-	// e := labgob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// data := w.Bytes()
-	// rf.persister.SaveRaftState(data)
+	DPrintf("persist #%v: current%v, voterFor%v", rf.me, rf.currentTerm, rf.votedFor)
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.logs)
+	data := w.Bytes()
+	rf.persister.SaveRaftState(data)
 }
 
 //
@@ -180,17 +184,22 @@ func (rf *Raft) readPersist(data []byte) {
 	}
 	// Your code here (2C).
 	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var currentTerm int
+	var votedFor int
+	var logs []LogEntry
+	if d.Decode(&currentTerm) != nil ||
+		d.Decode(&votedFor) != nil || d.Decode(&logs) != nil {
+		DPrintf("read persistent data error")
+	} else {
+		rf.mu.Lock()
+		defer rf.mu.Unlock()
+		rf.currentTerm = currentTerm
+		rf.votedFor = votedFor
+		rf.logs = logs
+		DPrintf("readPersist #%v: current%v, voterFor%v", rf.me, rf.currentTerm, rf.votedFor)
+	}
 }
 
 //
@@ -268,6 +277,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.votedFor = args.CandidateId
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = true
+
+		rf.persist()
 		DPrintf("RequestVote #%v: admit %v", rf.me, args.CandidateId)
 	} else {
 		reply.Term = rf.currentTerm
@@ -308,6 +319,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		}
 
 		rf.logs = rf.logs[:args.PrevLogIndex-1]
+		rf.persist()
 		DPrintf("AppendEntries #%v: log inconsistency, Term %v not %v by %v in idx %v",
 			rf.me, reply.InconsistentTerm, args.PrevLogTerm, args.PrevLogIndex, args.LeaderId)
 		return
@@ -327,6 +339,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		pointer++
 		if pointer > rf.GetLastLogIdx() {
 			rf.logs = append(rf.logs, args.Entries[i:]...)
+			rf.persist()
 			break
 		}
 		if log.Term == rf.logs[pointer].Term {
@@ -334,6 +347,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		} else {
 			rf.logs = rf.logs[:pointer]
 			rf.logs = append(rf.logs, args.Entries[i:]...)
+			rf.persist()
 			break
 		}
 	}
@@ -429,6 +443,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 	term = rf.currentTerm
 	rf.logs = append(rf.logs, LogEntry{term, command})
+	rf.persist()
 	index = rf.GetLastLogIdx()
 	rf.matchIndex[rf.me] = index
 
@@ -504,6 +519,7 @@ func (rf *Raft) beLeader() {
 		DPrintf("%v converted to leader", rf.me)
 	}
 	rf.votedFor = rf.me
+	rf.persist()
 	rf.status = leader // leader
 
 	rf.nextIndex = make([]int, len(rf.peers))
@@ -521,6 +537,7 @@ func (rf *Raft) beFollower(term int) {
 	rf.status = follower
 	rf.votedFor = -1
 	rf.timeout = GetInitTimeout()
+	rf.persist()
 }
 
 func (rf *Raft) beCandidate() {
@@ -530,6 +547,7 @@ func (rf *Raft) beCandidate() {
 	rf.status = candidate
 	rf.votedFor = rf.me
 	rf.currentTerm++
+	rf.persist()
 	rf.timeout = GetInitTimeout()
 }
 
@@ -603,11 +621,11 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// follower
 	go func() {
-		for true {
-			time.Sleep(100 * time.Millisecond)
+		for !rf.killed() {
+			time.Sleep(10 * time.Millisecond)
 			rf.mu.Lock()
 			if rf.status == follower || rf.status == candidate {
-				rf.timeout -= 100
+				rf.timeout -= 10
 			}
 			if (rf.status == follower || rf.status == candidate) && rf.timeout <= 0 {
 				DPrintf("%v try to be leader", rf.me)
@@ -622,7 +640,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// leader
 	go func() {
-		for true {
+		for !rf.killed() {
 			time.Sleep(100 * time.Millisecond)
 			rf.mu.Lock()
 			if rf.status == leader {
